@@ -78,6 +78,20 @@ type kernel_sigaction struct {
 	mask     uint64
 }
 
+// PR_SET_CHILD_SUBREAPER (linux/prctl.h) — not in the stdlib syscall pkg.
+const PR_SET_CHILD_SUBREAPER = 36
+
+// becomeSubreaper: prctl(PR_SET_CHILD_SUBREAPER, 1) so orphaned children
+// of dying processes are reparented to us instead of init.
+func becomeSubreaper() error {
+	_, _, errno := syscall.Syscall6(syscall.SYS_PRCTL,
+		PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0, 0)
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
 // ignoreSigchld sets SIGCHLD to SIG_IGN via rt_sigaction.
 func ignoreSigchld() error {
 	act := &kernel_sigaction{handler: 1} // (sighandler_t)SIG_IGN
@@ -174,8 +188,8 @@ func main() {
 	fmt.Printf("gozer: zombie reaper starting (pid %d)\n", me)
 
 	// 1. Subreaper: orphans come to us instead of init.
-	if err := syscall.Prctl(syscall.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
-		fmt.Fprintf(os.Stderr, "gozer: PR_SET_CHILD_SUBREAPER failed: %v\n", err)
+	if err := becomeSubreaper(); err != nil {
+		fmt.Fprintf(os.Stderr, "gozer: prctl(PR_SET_CHILD_SUBREAPER) failed: %v\n", err)
 	}
 
 	// 2. Ignore SIGCHLD: kernel auto-reaps every child of ours that dies.
