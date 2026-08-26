@@ -155,7 +155,7 @@ func zombies() [][2]int {
 
 // killTree delivers a signal to pid and its whole process group, so
 // siblings also die and are reparented to us (and auto-reaped).
-func killTree(pid, sig int) {
+func killTree(pid int, sig syscall.Signal) {
 	_ = syscall.Kill(-pid, sig) // process group
 	_ = syscall.Kill(pid, sig)  // exact pid (non-leader threads, etc.)
 }
