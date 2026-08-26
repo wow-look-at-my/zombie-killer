@@ -201,7 +201,7 @@ func main() {
 	}
 
 	// Behave well: don't die if the terminal goes away.
-	_ = syscall.Setsid()
+	_, _ = syscall.Setsid()
 
 	// 3. Kill-the-parent loop.
 	for pass := 1; pass <= maxPasses; pass++ {
