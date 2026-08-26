@@ -1,0 +1,14 @@
+# Built artifacts
+gozer
+makezombies
+*.ko
+*.ko.*
+*.mod
+*.mod.c
+*.o
+*.cmd
+*.symvers
+*.order
+modules.order
+Module.symvers
+kernel-module/*.mod kernel-module/*.o kernel-module/*.ko*
