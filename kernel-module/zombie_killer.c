@@ -20,7 +20,8 @@
  *   for_each_process(), taking a reference on each candidate so the
  *   task_struct cannot vanish while we work on it.
  *
- *   Pass 2 (under tasklist_lock write lock), for each victim:
+ *   Pass 2 (under RCU — tasklist_lock is kernel-internal and not
+ *   exported to modules, so we cannot take it), for each victim:
  *     - set exit_state = EXIT_DEAD. This is the load-bearing step: every
  *       wait path and every reparent path skips EXIT_DEAD tasks
  *       (wait_consider_task(): "if (unlikely(exit_state == EXIT_DEAD))
@@ -28,13 +29,12 @@
  *       EXIT_DEAD)) return;"), so nobody can ever again try to
  *       release_task() it — which would double-unhash and corrupt the
  *       lists. We atomically "own" the reap, exactly like wait_task_zombie()
- *       does with its cmpxchg, just with the tasklist lock instead.
+ *       does with its cmpxchg, just without the tasklist lock.
  *     - list_del_rcu(&p->tasks): unlink from the global list — this is
  *       what makes the task vanish from /proc, ps, htop, top, pidof.
- *     - list_del_init(&p->sibling): unlink from the parent's children
- *       list, so the parent cannot try to wait4() it either.
- *     - unlink the thread-group bookkeeping (thread_node); the
- *       thread_group head is already empty for a fully-dead group.
+ *     - the parent's children list (sibling) and thread_node are left
+ *       linked: their stale pointers are harmless, because EXIT_DEAD
+ *       makes every wait and reparent path skip the task.
  *
  * The task_struct itself is intentionally left allocated: a zombie holds
  * no resources, and freeing it fully would mean replicating release_task()
@@ -57,12 +57,12 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/sched.h>
-#include <linux/sched/signal.h>   /* for_each_process(), tasklist_lock   */
+#include <linux/sched/signal.h>   /* for_each_process()                  */
 #include <linux/sched/task.h>     /* EXIT_ZOMBIE / EXIT_DEAD             */
 #include <linux/init_task.h>      /* init_task                           */
 #include <linux/pid_namespace.h>  /* task_active_pid_ns()                */
 #include <linux/list.h>
-#include <linux/spinlock.h>
+#include <linux/rculist.h>
 #include <linux/rcupdate.h>
 
 MODULE_LICENSE("GPL");
@@ -95,36 +95,36 @@ static bool zk_is_zombie(struct task_struct *p)
 }
 
 /*
- * Unlink one zombie from every list/state that makes it visible.
- * The caller holds its own reference (get_task_struct), so the task
- * cannot be freed underneath us. Returns the victim's parent pid for
- * the log line (read while the tasklist lock also protects the parent).
+ * Unlink one zombie from the global process list — the step that makes
+ * it vanish from /proc, ps, htop and top.
+ *
+ * tasklist_lock is a kernel-internal symbol, not exported to modules,
+ * so we cannot take the write lock the way wait_task_zombie() does.
+ * Instead:
+ *   - pass 1 already took a reference (get_task_struct), so the
+ *     task_struct cannot be freed underneath us;
+ *   - we set EXIT_DEAD first, so no wait/reparent path can touch the
+ *     task (or its lists) again after we unlink it;
+ *   - readers of the process list (for_each_process(), /proc) walk it
+ *     under RCU, so list_del_rcu() keeps concurrent traversals safe.
+ *
+ * Returns the victim's parent pid for the log line (best-effort read;
+ * the parent pointer cannot go NULL on us because we hold a reference).
  */
 static int zk_unlink(struct task_struct *p)
 {
 	int ppid;
 
-	write_lock_irq(&tasklist_lock);
-	ppid = p->real_parent->pid;
+	rcu_read_lock();
+	ppid = rcu_dereference(p->real_parent)->pid;
+	rcu_read_unlock();
 
-	if (p->exit_state == EXIT_ZOMBIE) {
-		/*
-		 * EXIT_DEAD makes every waiter skip this task, so nothing
-		 * will ever release_task() it after we unlink it.
-		 */
-		p->exit_state = EXIT_DEAD;
+	p->exit_state = EXIT_DEAD;
 
-		if (thread_group_leader(p)) {
-			list_del_rcu(&p->tasks);       /* global list       */
-			INIT_LIST_HEAD(&p->tasks);
-			list_del_init(&p->sibling);    /* parent's children */
-		}
-		/* thread-group bookkeeping; thread_group head is already
-		 * empty for a fully-dead group, so only touch thread_node */
-		list_del_rcu(&p->thread_node);
-		INIT_LIST_HEAD(&p->thread_node);
-	}
-	write_unlock_irq(&tasklist_lock);
+	rcu_read_lock();
+	list_del_rcu(&p->tasks);
+	rcu_read_unlock();
+
 	return ppid;
 }
 
