@@ -10,7 +10,8 @@ env:
 jobs:
   build:
     name: Compile gozer + C helper + kernel module
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Kbuild needs headers for the host kernel, which a fleet container cannot install.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -50,6 +51,9 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
+      - name: Install a C compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
       - name: Build gozer and spawner
         run: |
           go build -v -o gozer main.go
@@ -60,7 +64,8 @@ jobs:
 
   module-load:
     name: Load kernel module and reap zombies (best-effort)
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    # insmod loads into the host kernel, which a fleet container cannot reach.
+    runs-on: ubuntu-latest
     needs: build
     continue-on-error: true
     steps:
