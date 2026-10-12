@@ -4,59 +4,10 @@
 // handler, no resources to free. The only thing that removes a zombie from
 // the process list (from /proc, ps, htop, top, ...) is the kernel function
 // release_task(), which is normally called only from a wait4()/waitid() by
-// the zombie's parent, or by the kernel's own "autoreap" path. This program
-// drives exactly those two kernel mechanisms, using only syscalls — no
+// the zombie's parent. This is or by the kernel's own "autoreap" path. This
+// program drives exactly those kernel mechanisms, using only syscalls. No
 // kernel module, no /proc surgery, no ptrace (ptrace_attach() refuses tasks
 // with exit_state set: `if (unlikely(task->exit_state)) return -EPERM;`).
-//
-// The kernel rules this program relies on (all verified in mainline
-// kernel/exit.c and kernel/signal.c):
-//
-//   * do_notify_parent(): if a task's parent has SIGCHLD set to SIG_IGN
-//     (or SA_NOCLDWAIT), the kernel sets autoreap and, for SIG_IGN, does
-//     not even deliver SIGCHLD. exit_notify() then puts the task on its
-//     "dead" list with exit_state = EXIT_DEAD and release_task()s it — the
-//     zombie never appears, no wait() ever needed.
-//   * reparent_leader() (called from forget_original_parent() while a
-//     process is exiting): a child that is ALREADY EXIT_ZOMBIE is passed to
-//     do_notify_parent() with the *new* parent; if the new parent ignores
-//     SIGCHLD, the zombie is moved to EXIT_DEAD and added to the exiting
-//     process's "dead" list, and exit_notify() release_task()s it right
-//     there. So when a parent dies, its zombie children die with it if the
-//     next parent up ignores SIGCHLD.
-//   * release_task() -> __unhash_process() (detach_pid + list_del) is what
-//     makes a task vanish from /proc and every process listing.
-//
-// What gozer does:
-//
-//  1. prctl(PR_SET_CHILD_SUBREAPER, 1): orphaned children of dying
-//     processes are reparented to gozer instead of init.
-//  2. sigaction(SIGCHLD, SIG_IGN): every child that dies while reparented
-//     to gozer is auto-reaped by the kernel (rule above) — gozer itself
-//     never needs to call wait*() for them.
-//  3. Every 250 ms it scans /proc for state 'Z'. For each zombie whose
-//     parent is still alive, it SIGKILLs the parent (and its process
-//     group, so surviving siblings are also reparented to gozer and
-//     auto-reaped). Each dying parent reaps its already-zombie children
-//     (rule above), so the zombie climbs the parent chain and, when it
-//     reaches gozer, is auto-reaped. A zombie whose parent is init is
-//     reaped by init itself (systemd reaps; plain init ignores SIGCHLD).
-//  4. As a belt-and-braces sweep, it calls wait4(pid, ..., WNOHANG) on
-//     every zombie that is directly its child — exactly what a normal
-//     parent does — in case any slipped through.
-//
-// The only thing it "destroys" is the zombie's parent process. Zombies are
-// always removed permanently: release_task() unhashes them from the pid
-// hash, the task list, and the children list; /proc and all process
-// viewers derive from those lists.
-//
-// Build:  go build -o gozer main.go
-// Run:    sudo ./gozer        (needs only permission to kill the parents;
-//                              run as root for full coverage)
-// Test:   make test           (builds test/makezombies, spawns zombies,
-//                              runs gozer, asserts zero zombies remain)
-//
-// Exit status: 0 when /proc shows no zombies, 1 otherwise.
 package main
 
 import (
@@ -69,8 +20,8 @@ import (
 	"unsafe"
 )
 
-// kernel_sigaction mirrors struct kernel_sigaction on amd64 (and most
-// 64-bit Linux arches): handler, flags, restorer, mask. SIG_IGN == 1.
+// kernel_sigaction mirrors struct kernel_sigaction on amd64 (and most 64-bit
+// Linux arches): handler, flags, restorer, mask.
 type kernel_sigaction struct {
 	handler  uintptr
 	flags    uintptr
@@ -81,8 +32,6 @@ type kernel_sigaction struct {
 // PR_SET_CHILD_SUBREAPER (linux/prctl.h) — not in the stdlib syscall pkg.
 const PR_SET_CHILD_SUBREAPER = 36
 
-// becomeSubreaper: prctl(PR_SET_CHILD_SUBREAPER, 1) so orphaned children
-// of dying processes are reparented to us instead of init.
 func becomeSubreaper() error {
 	_, _, errno := syscall.Syscall6(syscall.SYS_PRCTL,
 		PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0, 0)
@@ -98,8 +47,8 @@ func ignoreSigchld() error {
 	_, _, errno := syscall.Syscall6(syscall.SYS_RT_SIGACTION,
 		uintptr(syscall.SIGCHLD),
 		uintptr(unsafe.Pointer(act)),
-		0,                       // oldact
-		8,                       // sizeof(kernel_sigset_t)
+		0, // oldact
+		8, // sizeof(kernel_sigset_t)
 		0, 0)
 	if errno != 0 {
 		return errno
@@ -108,7 +57,7 @@ func ignoreSigchld() error {
 }
 
 const passDelay = 250 * time.Millisecond
-const maxPasses = 120 // ~30 s safety valve
+const maxPasses = 120
 
 // --- /proc helpers -------------------------------------------------------
 
@@ -193,9 +142,6 @@ func main() {
 	}
 
 	// 2. Ignore SIGCHLD: kernel auto-reaps every child of ours that dies.
-	//    (rt_sigaction(SIGCHLD, handler=SIG_IGN); we issue the syscall
-	//    directly with an explicit struct so it does not depend on any
-	//    stdlib signal type.)
 	if err := ignoreSigchld(); err != nil {
 		fmt.Fprintf(os.Stderr, "gozer: rt_sigaction(SIGCHLD, SIG_IGN) failed: %v\n", err)
 	}
@@ -214,9 +160,7 @@ func main() {
 		for _, z := range zs {
 			fmt.Printf("    zombie %d (parent %d)\n", z[0], z[1])
 			if z[1] != me && z[1] != 1 {
-				// Kill the parent: the dying parent reaps its zombie
-				// children (kernel reparent_leader/exit_notify), and any
-				// that outlive it are reparented to us, then auto-reaped.
+				// Kill the parent: the dying parent reaps its zombie children (kernel reparent_leader/exit_notify), and any that outlive it are reparented to us.
 				killTree(z[1], syscall.SIGKILL)
 			}
 		}

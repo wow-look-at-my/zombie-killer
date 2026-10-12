@@ -1,10 +1,4 @@
 // makezombies — spawn a bunch of zombie children and never reap them.
-//
-// Each child _exit()s immediately and becomes a zombie under this process,
-// which then sleeps forever without ever calling wait(). Run it, then run
-// gozer: gozer will SIGKILL this process, at which point every zombie is
-// reparented to gozer (or init) and auto-reaped, because gozer ignores
-// SIGCHLD (kernel autoreap) — or reaped via wait4().
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
