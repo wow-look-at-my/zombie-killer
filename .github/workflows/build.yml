@@ -2,7 +2,12 @@ name: build-and-test
 
 on:
   push:
+    branches: ['**']
   pull_request:
+
+concurrency:
+  group: gha_${{ github.repository }}_${{ github.workflow }}_${{ github.ref != 'refs/heads/master' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 env:
   GO_VERSION: '1.21'
@@ -10,7 +15,8 @@ env:
 jobs:
   build:
     name: Compile gozer + C helper + kernel module
-    runs-on: ubuntu-latest
+    # Kbuild needs headers for the host kernel, which a fleet container cannot install.
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +46,7 @@ jobs:
 
   test-gozer:
     name: End-to-end gozer test
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
     needs: build
     steps:
       - uses: actions/checkout@v4
@@ -49,6 +55,9 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+
+      - name: Install a C compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc
 
       - name: Build gozer and spawner
         run: |
@@ -60,7 +69,8 @@ jobs:
 
   module-load:
     name: Load kernel module and reap zombies (best-effort)
-    runs-on: ubuntu-latest
+    # insmod loads into the host kernel, which a fleet container cannot reach.
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
     needs: build
     continue-on-error: true
     steps:
